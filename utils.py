@@ -445,3 +445,80 @@ def AWGN_channel(x, snr, device):  # used to simulate additive white gaussian no
         a=torch.sqrt(n_power)
         noise = torch.randn(batch_size, code_dim, device=device) * a
         return x+noise
+
+
+def Dropout_rateless(x, p=0.5, mode='uniform', is_tail=False, distribution = None, power_beta=1, device=None):
+
+    if p < 0 or p > 1:
+        raise Exception("p value should accomplish 0 < p < 1")
+
+    kp = 1 - p
+    f =  distribution
+    x_shape = x.shape
+    dim = x_shape[-1]
+
+    if p != 0:
+        # 生成mask矩阵。
+        # torch.rand_like：生成和x相同尺寸的张量，取值在[0,1)之间均匀分布。
+        if mode ==  'uniform':
+            mask = (torch.rand_like(x) < kp).int()
+
+        else:
+            if not f:
+                raise Exception("Missing distribution!")
+            expect_num = 0
+            for i in range(dim):
+                expect_num += self.f(i/dim)
+            norm_factor = dim*self.p/expect_num
+            mask_p = torch.zeros_like(x)
+            for j in range(dim):
+                mask_p[...,j] = norm_factor*self.f(j/dim)
+            mask = torch.bernoulli(1-mask_p)
+        # print(mask_p[0,:])
+        # print(mask[0,:])
+        # exit()
+        # 先用mask矩阵对x矩阵进行处理，再除以1 - p（保留概率），即上述所说的反向DropOut操作，不需要在测试集上再缩放。
+        if is_tail:
+            F = [(i/dim)**power_beta for i in range(dim+1)]
+            f = [F[i+1]-F[i] for i in range(dim)]
+            index = np.random.choice(dim,1,p=f)
+            rate = int(dim-index)
+            mask = torch.cat([torch.ones(rate),torch.zeros(dim-rate)],dim=0).to(device)
+            mask = mask.repeat(x.shape[0],1)
+                                    
+        return x * mask
+    else:
+        return x
+
+def Dropout_rateless_rate(x, p=0.5, is_tail=False, device=None):
+
+    if p < 0 or p > 1:
+        raise Exception("p value should accomplish 0 < p < 1")
+
+    kp = 1-p
+    dim = x.shape[-1]
+    rate = round(dim*(1-p))
+    mask = torch.cat([torch.ones(rate),torch.zeros(dim-rate)],dim=0).to(device)
+    mask = mask.repeat(x.shape[0],1)
+
+    if is_tail:
+        return x * mask / kp
+    else:
+        idx = torch.randperm(mask.shape[1])
+        mask = mask[:,idx].view(mask.size())
+        return x * mask / kp  
+
+def kl_divergence(p, q):
+    '''
+    args:
+        2 tensors `p` and `q`
+        [batch, feature]
+    returns:
+        kl divergence between the `p` and softmax of `q`
+    '''
+    q = F.softmax(q, dim=-1)
+
+    s1 = torch.sum(p * torch.log(p / q))
+    s2 = torch.sum((1 - p) * torch.log((1 - p) / (1 - q)))
+    return s1 + s2   
+

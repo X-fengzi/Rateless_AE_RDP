@@ -67,9 +67,19 @@ def compute_gradient_penalty(D, real_samples, fake_samples):
 def log_drop(x):
     return math.log(x+6)
 
+def test():
+    
+
 
 def train(args, device):
     experiment_path = args.experiment_path
+    if args.is_drop:
+        experiment_path = experiment_path + '/drop'+'_'+str(args.latent_dim)
+    if args.is_SAE:
+        experiment_path = experiment_path + '/SAE'+'_'+str(args.latent_dim)
+
+    experiment_path = experiment_path + args.set_path
+
     use_si = args.use_si
 
     assert (args.L > 0 or not args.quantize) and args.latent_dim > 0
@@ -145,9 +155,9 @@ def train(args, device):
 
     for epoch in range(args.n_epochs):
         Lambda = args.Lambda_base
-        if Lambda == 0:
-            # Give an early edge to training discriminator for Lambda = 0
-            Lambda = compute_lambda_anneal(Lambda, epoch)
+        # if Lambda == 0:
+        #     # Give an early edge to training discriminator for Lambda = 0
+        #     Lambda = compute_lambda_anneal(Lambda, epoch)
 
         for i, (x, y) in enumerate(train_dataloader):
             # Configure input
@@ -175,6 +185,11 @@ def train(args, device):
                 # cr: [b_size, latent_dim]
 
                 code = encoder(x, cr, y)
+
+                if args.is_drop:
+                    code = Dropout_rateless(code, p = 0.5, mode = args.drop_mode, is_tail=args.is_tail, distribution=log_drop, power_beta=args.tail_drop_power_beta, device=device)
+                if args.AWGN:
+                    code = AWGN_channel(code,args.SNR,device)   
                 x_recon = decoder(code, cr, y)
                 # Real images
                 real_validity = discriminator1(x)
@@ -199,48 +214,61 @@ def train(args, device):
 
                 cr = uniform_noise([x.size(0), args.latent_dim], alpha1).to(device)
 
-                loss = 0
-                for dim in range(args.latent_dim):
-                    drop = base_model.Dropout_rateless(p = 1-(dim+1)/args.latent_dim,mode = args.drop, distribution=log_drop)
-                    code = encoder(x, cr, y)
-                    code = drop(code)
-                    x_recon = decoder(code, cr, y)
+                # loss = 0
+                # for dim in range(args.latent_dim):
 
-                    # real_validity = discriminator(x)
-                    fake_validity = discriminator1(x_recon)
+                #     code = encoder(x, cr, y)
+                #     code = Dropout_rateless(code, p = 1-(dim+1)/args.latent_dim, mode = args.drop, is_tail=args.is_tail, distribution=log_drop)
+                #     x_recon = decoder(code, cr, y)
 
-                    perception_loss = -torch.mean(fake_validity) # + torch.mean(real_validity)
-                    distortion_loss = criterion(x, x_recon)
-                    # if use_indirect:
-                    #     distortion_loss = criterion(xn, x_recon)
+                #     # real_validity = discriminator(x)
+                #     fake_validity = discriminator1(x_recon)
 
-                    loss += (dim+1)*(args.Lambda_distortion*distortion_loss + Lambda*perception_loss)/args.latent_dim
+                #     perception_loss = -torch.mean(fake_validity) # + torch.mean(real_validity)
+                #     distortion_loss = criterion(x, x_recon)
+                #     # if use_indirect:
+                #     #     distortion_loss = criterion(xn, x_recon)
 
-                loss.backward()
+                #     loss += (dim+1)*(args.Lambda_distortion*distortion_loss + Lambda*perception_loss)/args.latent_dim
 
-                optimizer_G.step()
-                optimizer_E.step()
-
-                # drop = base_model.Dropout_rateless(p = 0.5)
-
-                # code = encoder(x, cr, y)
-                # code = AWGN_channel(code, 5, device)
-                # code = drop(code)
-                # x_recon = decoder(code, cr, y)
-
-                # real_validity = discriminator(x)
-                # fake_validity = discriminator1(x_recon)
-
-                # perception_loss = -torch.mean(fake_validity) # + torch.mean(real_validity)
-                # distortion_loss = criterion(x, x_recon)
-                # # if use_indirect:
-                # #     distortion_loss = criterion(xn, x_recon)
-
-                # loss = args.Lambda_distortion*distortion_loss + Lambda*perception_loss
                 # loss.backward()
 
                 # optimizer_G.step()
                 # optimizer_E.step()
+
+                # drop = base_model.Dropout_rateless(p = 0.5)
+
+                code = encoder(x, cr, y)
+
+                loss_kld = 0
+                if args.is_SAE:
+                    tho_tensor = torch.FloatTensor([args.SAE_lamda for _ in range(args.latent_dim)]).unsqueeze(0).to(device)
+                    code_avg = torch.sum(code, dim=0, keepdim=True) / code.shape[0]
+                    loss_kld = kl_divergence(tho_tensor, code_avg)
+
+                if args.is_drop:
+                    code = Dropout_rateless(code, p = 0.5, mode = args.drop_mode, is_tail=args.is_tail, distribution=log_drop, power_beta=args.tail_drop_power_beta, device=device)
+                if args.AWGN:
+                    code = AWGN_channel(code,args.SNR,device)
+                if i == 1:
+                    print(code[0])
+                x_recon = decoder(code, cr, y)
+
+                real_validity = discriminator1(x)
+                fake_validity = discriminator1(x_recon)
+
+                perception_loss = -torch.mean(fake_validity) # + torch.mean(real_validity)
+                distortion_loss = criterion(x, x_recon)
+                # if use_indirect:
+                #     distortion_loss = criterion(xn, x_recon)
+
+              
+
+                loss = args.Lambda_distortion*distortion_loss + Lambda*perception_loss + args.KL_loss_lamda*loss_kld
+                loss.backward()
+
+                optimizer_G.step()
+                optimizer_E.step()
 
             if batches_done % 100 == 0:
                 with torch.no_grad(): # use most recent results
@@ -271,9 +299,7 @@ def train(args, device):
             '''
 
             distortion_loss_avg, perception_loss_avg = 0, 0
-
-            
-            
+                     
             for j, (x_test, y_test) in enumerate(test_dataloader):
                 x_test = x_test.to(device)
                 y_test = y_test.to(device)
@@ -291,10 +317,11 @@ def train(args, device):
                         if y_test[(ii+offset)%x_test.size(0)] == i:
                             test_index.append((ii+offset)%x_test.size(0))
                             break
+                test_index = [71,265,186,382,163,162,361,34,110,16]
                 plot_graph = x_test.data[test_index]
-                for L in range(9):                  
-                    drop_test = base_model.Dropout_rateless(p = L/9, mode = args.drop, distribution=log_drop)
-                    code = drop_test(encoder(x_test, u1_test, y_test))
+                for L in range(9):  
+
+                    code = Dropout_rateless_rate(encoder(x_test, u1_test, y_test),p = L/9, is_tail=args.is_tail, device=device)
                     # print(code[0])
                     x_test_recon = decoder(code, u1_test, y_test)
                     distortion_loss, perception_loss = evaluate_losses(x_test, x_test_recon, discriminator1)
@@ -303,7 +330,8 @@ def train(args, device):
                     plot_graph = torch.cat([plot_graph,x_test_recon.data[test_index]],dim=0)                       
                 
                 if j == 0 and is_progress_interval(args, epoch):
-                    save_image(unnormalizer(plot_graph), f"{experiment_path}/{epoch}_recon.png", nrow=n_row, normalize=True)
+                    # save_image(unnormalizer(plot_graph), f"{experiment_path}/{epoch}_recon.png", nrow=n_row, normalize=True)
+                    save_image(plot_graph, f"{experiment_path}/{epoch}_recon.png", nrow=n_row, normalize=True)
                     print("the image has saved")
                     if not saved_original_test_image:
                         save_image(unnormalizer(x_test.data[test_index]), f"{experiment_path}/{epoch}_real.png", nrow=n_row, normalize=True)
@@ -348,7 +376,18 @@ if __name__ == '__main__':
     parser.add_argument("--Lambda_base", type=float, default=0,
                         help="coefficient for perception loss for training base model (default: 0.0)")
     parser.add_argument("--latent_dim", type=int, default=24, help="dimensionality of the latent space")
-    parser.add_argument("--drop", type=str, default="sto", help="the method of drop out")
+
+    parser.add_argument("--is_drop", type=bool, default=True, help="the distribution of drop out")
+    parser.add_argument("--drop_mode", type=str, default="uniform", help="the distribution of drop out")
+    parser.add_argument("--is_tail", type=bool, default=True, help="the method of drop out")
+    parser.add_argument("--tail_drop_power_beta", type=float, default=0.67, help="the value of power beta")
+
+    parser.add_argument("--is_SAE", type=bool, default=False, help="if sparse AE")
+    parser.add_argument("--SAE_lamda", type=float, default=0.1, help="the sparse degree of SAE")
+    parser.add_argument("--KL_loss_lamda", type=float, default=1, help="the coeff of KL loss in SAE")
+
+    parser.add_argument("--AWGN", type=bool, default=True, help="add AWGN channel")
+    parser.add_argument("--SNR", type=float, default=5, help="the SNR(dB) of channel")
 
     parser.add_argument("--n_epochs", type=int, default=25, help="number of epochs of training")
     parser.add_argument("--n_channel", type=int, default=1, help="number of image channels")
@@ -383,9 +422,10 @@ if __name__ == '__main__':
     parser.add_argument("--progress_intervals", type=int, default=1, help="periodically show progress of training")
     parser.add_argument("--entropy_intervals", type=int, default=-1, help="periodically calculate entropy of model. -1 only end, -2 for never")
     parser.add_argument("--submode", type=str, default=None, help="generic submode of mode")
-    parser.add_argument("-mode", type=str, default='base', help="base, refined or reduced training mode")
-    file_pre = './wrl/MultiObject/graph_24_sto_lamda_10/'
-    parser.add_argument("-experiment_path", type=str, default=file_pre+'experiments', help="name of the subdirectory to save")
+    parser.add_argument("--mode", type=str, default='base', help="base, refined or reduced training mode")
+    parser.add_argument("--experiment_path", type=str, default='./wrl/experiments', help="name of the subdirectory to save")
+    parser.add_argument("--set_path", type=str, default='_power_0.67_AWGN_5dB', help="name of the subdirectory to save")
+    
 
     args = parser.parse_args()
     print(args)
