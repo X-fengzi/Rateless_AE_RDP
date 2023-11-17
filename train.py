@@ -4,6 +4,7 @@ from torchvision.utils import save_image
 from torch.optim.lr_scheduler import LambdaLR
 import models.base_model as base_model
 from utils import *
+import torch.nn as nn
 from torch.autograd import Variable
 import torch.autograd as autograd
 import numpy as np
@@ -67,8 +68,68 @@ def compute_gradient_penalty(D, real_samples, fake_samples):
 def log_drop(x):
     return math.log(x+6)
 
-def test():
-    
+def test(args,test_dataloader,encoder,decoder,discriminator,epoch,experiment_path,alpha1,SNR=None,device):
+
+    with torch.no_grad():
+            encoder.eval()
+            decoder.eval()
+            discriminator.eval()
+
+            '''
+            is_entropy_interval = args.entropy_intervals > 0 and (epoch < 5 or epoch % args.entropy_intervals == 0)
+            if is_entropy_interval or ((epoch == args.n_epochs - 1 or epoch == 0) and args.entropy_intervals != -2):
+                # use test batch size on training set for efficiency
+                base_estimate_entropy_(encoder, args.latent_dim, args.L, args.Lambda_base, 'train',
+                                       args.test_batch_size, experiment_path, args.dataset, device)
+            '''
+
+            for L in range(9):   
+                distortion_loss_avg, perception_loss_avg = 0, 0                 
+                for j, (x_test, y_test) in enumerate(test_dataloader):
+                    x_test = x_test.to(device)
+                    y_test = y_test.to(device)
+                    u1_test = uniform_noise([x_test.size(0), args.latent_dim], alpha1).to(device)
+
+                    n_row = 10
+                    n_column = 10
+                    n_images = n_row*n_column
+                    # test_index = []
+                    # for i in range(10):
+                    #     for ii in range(x_test.size(0)):
+                    #         # offset = torch.randint(low=0, high=x_test.size(0))
+                    #         offset = 170
+                    #         if y_test[(ii+offset)%x_test.size(0)] == i:
+                    #             test_index.append((ii+offset)%x_test.size(0))
+                    #             break
+                    test_index = [71,265,186,382,163,162,361,34,110,16]
+                    if j == 0:
+                        plot_graph = x_test.data[test_index]
+
+                    code = Dropout_rateless_rate(encoder(x_test, u1_test, y_test),p = L/9, is_tail=args.is_tail, device=device)
+                    code = AWGN_channel(code,SNR,device)
+                    # print(code[0])
+                    x_test_recon = decoder(code, u1_test, y_test)
+                    distortion_loss, perception_loss = evaluate_losses(x_test, x_test_recon, discriminator1)
+                    distortion_loss_avg += x_test.size(0) * distortion_loss
+                    perception_loss_avg += x_test.size(0) * perception_loss
+                    if j == 0:
+                        plot_graph = torch.cat([plot_graph,x_test_recon.data[test_index]],dim=0)  
+                distortion_loss_avg /= test_set_size
+                perception_loss_avg /= test_set_size
+                with open(f'{experiment_path}/{SNR}dB/{L}_losses.csv', 'a') as f:
+                    f.write(f'{epoch},{distortion_loss_avg},{perception_loss_avg}\n')                  
+                    
+            if is_progress_interval(args, epoch):
+                # save_image(unnormalizer(plot_graph), f"{experiment_path}/{epoch}_recon.png", nrow=n_row, normalize=True)
+                save_image(plot_graph, f"{experiment_path}/{SNR}dB/{epoch}_recon.png", nrow=n_row, normalize=True)
+                print("the image has saved")
+                if not saved_original_test_image:
+                    save_image(unnormalizer(x_test.data[test_index]), f"{experiment_path}/{epoch}_real.png", nrow=n_row, normalize=True)
+                    saved_original_test_image = True           
+
+            encoder.train()
+            decoder.train()
+            discriminator.train()
 
 
 def train(args, device):
